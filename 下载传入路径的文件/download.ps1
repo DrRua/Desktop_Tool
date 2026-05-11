@@ -76,18 +76,20 @@ function Add-Log {
 
 function Parse-Urls {
     param([string]$text)
-    $lines = $text -split '[\r\n]+'
+    $text = $text -replace "[`r`n`t]+", " "
+    $text = $text -replace "[`]+", ""
+    $text = $text.Trim()
+    
     $urls = @()
-    foreach ($line in $lines) {
-        $line = $line.Trim()
-        $pattern = '(https?://[^\s]+)'
-        if ($line -match $pattern) {
-            $url = $matches[1]
-            $url = $url -replace '[`\s''"]+$', ''
-            $url = $url -replace '^[`\s''"]+', ''
-            if ($url.StartsWith("http://") -or $url.StartsWith("https://")) {
-                $urls += $url
-            }
+    $pattern = "https?://[^\s""'`<>()\[\]{}]+"
+    $matches = [regex]::Matches($text, $pattern)
+    
+    foreach ($match in $matches) {
+        $url = $match.Value
+        $url = $url.Trim()
+        
+        if ($url -match "^https?://" -and $url.Length -gt 10) {
+            $urls += $url
         }
     }
     return $urls
@@ -163,14 +165,16 @@ $startButton.Add_Click({
             Add-Log "下载: $fileName ..."
             
             $webClient = New-Object System.Net.WebClient
-            $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            $webClient.Headers.Add("User-Agent", $ua)
             $webClient.DownloadFile($url, $filePath)
             $webClient.Dispose()
             
             if (Test-Path $filePath) {
                 $fileSize = (Get-Item $filePath).Length
                 $fileSizeMB = [math]::Round($fileSize / 1MB, 2)
-                Add-Log "  [成功] $fileName ($fileSizeMB MB)" "Lime"
+                $msg = "[成功] $fileName ($fileSizeMB MB)"
+                Add-Log $msg "Lime"
                 $successCount++
             } else {
                 Add-Log "  [失败] 文件未创建" "Red"
