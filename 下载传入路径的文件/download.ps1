@@ -87,12 +87,15 @@ function Parse-Urls {
     foreach ($match in $matches) {
         $url = $match.Value
         $url = $url.Trim()
-        
+        $url = $url -replace '[\u200B-\u200D\uFEFF\u00A0\u2060\u180E]', ''
+        $url = $url.Replace([char]96, '')
+        $url = $url.Trim()
+
         if ($url -match "^https?://" -and $url.Length -gt 10) {
             $urls += $url
         }
     }
-    return $urls
+    return ,$urls
 }
 
 $startButton.Add_Click({
@@ -149,7 +152,7 @@ $startButton.Add_Click({
         $url = $allUrls[$i]
         
         try {
-            $uri = New-Object System.Uri($url)
+            $uri = [System.Uri]::new($url)
             $fileName = $uri.Segments[-1]
             
             if ([string]::IsNullOrEmpty($fileName) -or $fileName -eq "/") {
@@ -165,24 +168,93 @@ $startButton.Add_Click({
             Add-Log "下载: $fileName ..."
             
             $webClient = New-Object System.Net.WebClient
-            $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             $webClient.Headers.Add("User-Agent", $ua)
+            $webClient.Headers.Add("Accept", "*/*")
+            $webClient.Headers.Add("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
+            $webClient.Headers.Add("Referer", "https://twitter.com/")
             $webClient.DownloadFile($url, $filePath)
             $webClient.Dispose()
-            
+
+            $isValid = $false
             if (Test-Path $filePath) {
+                $head = ""
+                try {
+                    $firstBytes = [System.IO.File]::ReadAllBytes($filePath)
+                    $head = [System.Text.Encoding]::UTF8.GetString($firstBytes, 0, [Math]::Min(8192, $firstBytes.Length))
+                } catch {}
+
+                $isHtml = $head -match "(?is)<\s*(html|video|source|!DOCTYPE|body)"
+
+                if ($isHtml) {
+                    $videoUrl = $null
+                    foreach ($pat in @(
+                        '(?is)<video[^>]*?src\s*=\s*["'']([^"'']+)["'']',
+                        '(?is)<source[^>]*?src\s*=\s*["'']([^"'']+)["'']',
+                        '(?i)["''](https?://[^"''\s]+\.(?:mp4|m3u8|mov|webm)(?:[^"''\s]*))["'']'
+                    )) {
+                        $m = [regex]::Match($head, $pat)
+                        if ($m.Success) { $videoUrl = $m.Groups[1].Value; break }
+                    }
+
+                    if ($videoUrl) {
+                        if ($videoUrl -notmatch '^https?://') {
+                            try {
+                                $videoUrl = [System.Uri]::new([System.Uri]::new($url), $videoUrl).AbsoluteUri
+                            } catch {}
+                        }
+                        Add-Log "  检测到 HTML 包装页，提取到视频 URL" "Cyan"
+                        Add-Log "  真实地址: $videoUrl" "Cyan"
+                        Remove-Item $filePath -Force
+
+                        try {
+                            $wc2 = New-Object System.Net.WebClient
+                            $wc2.Headers.Add("User-Agent", $ua)
+                            $wc2.Headers.Add("Accept", "*/*")
+                            $wc2.Headers.Add("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
+                            $wc2.Headers.Add("Referer", $url)
+                            $wc2.DownloadFile($videoUrl, $filePath)
+                            $wc2.Dispose()
+                        } catch {
+                            Add-Log "  [下载视频失败] $($_.Exception.Message)" "Red"
+                            if (Test-Path $filePath) { Remove-Item $filePath -Force }
+                        }
+                    } else {
+                        $displayPreview = ($head -replace "[\r\n\t]+", " ").Trim()
+                        if ($displayPreview.Length -gt 150) { $displayPreview = $displayPreview.Substring(0, 150) + "..." }
+                        Add-Log "  [失败] HTML 中未找到 video/source 标签" "Red"
+                        Add-Log "  页面预览: $displayPreview" "Yellow"
+                        Remove-Item $filePath -Force
+                    }
+                }
+
+                if ((Test-Path $filePath) -and ((Get-Item $filePath).Length -ge 10240)) {
+                    $isValid = $true
+                } elseif ((Test-Path $filePath) -and -not $isHtml) {
+                    $displayPreview = ($head -replace "[\r\n\t]+", " ").Trim()
+                    if ($displayPreview.Length -gt 150) { $displayPreview = $displayPreview.Substring(0, 150) + "..." }
+                    $fs = (Get-Item $filePath).Length
+                    Add-Log "  [失败] 文件过小 ($fs 字节)" "Red"
+                    if ($displayPreview.Length -gt 0) { Add-Log "  内容: $displayPreview" "Yellow" }
+                    Remove-Item $filePath -Force
+                }
+            } else {
+                Add-Log "  [失败] 文件未创建" "Red"
+            }
+
+            if ($isValid) {
                 $fileSize = (Get-Item $filePath).Length
                 $fileSizeMB = [math]::Round($fileSize / 1MB, 2)
                 $msg = "[成功] $fileName ($fileSizeMB MB)"
                 Add-Log $msg "Lime"
                 $successCount++
             } else {
-                Add-Log "  [失败] 文件未创建" "Red"
                 $failCount++
             }
             $count++
         } catch {
             Add-Log "  [失败] $($_.Exception.Message)" "Red"
+            Add-Log "  URL: '$url' (长度: $($url.Length))" "Yellow"
             $failCount++
         }
         
